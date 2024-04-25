@@ -117,7 +117,8 @@
 
 (defrecord JoinTable [env l r
                       ^SqlParser$JoinTypeContext join-type-ctx
-                      ^SqlParser$JoinSpecificationContext join-spec-ctx]
+                      ^SqlParser$JoinSpecificationContext join-spec-ctx
+                      common-cols]
   Scope
   (available-cols [_ table-name]
     (->> [l r]
@@ -125,7 +126,8 @@
                         (distinct)))))
 
   (find-decl [_ col-name]
-    (let [matches (->> [l r]
+    (let [matches (->> (if (get common-cols col-name)
+                         [l] [l r])
                        (keep (fn [scope]
                                (find-decl scope col-name))))]
       (when (> (count matches) 1)
@@ -147,13 +149,18 @@
                       "FULL" :full-outer-join
                       :join)
 
-          join-cond (or (some-> join-spec-ctx
-                                (.accept
-                                 (reify SqlVisitor
-                                   (visitJoinCondition [_ ctx]
-                                     (let [expr-visitor (->ExprPlanVisitor env this-scope)]
-                                       [(-> (.expr ctx)
-                                            (.accept expr-visitor))])))))
+          join-cond (or (if common-cols
+                          (vec (for [col-name common-cols]
+                                 {(find-decl l col-name)
+                                  (find-decl r col-name)}))
+
+                          (some-> join-spec-ctx
+                                  (.accept
+                                   (reify SqlVisitor
+                                     (visitJoinCondition [_ ctx]
+                                       (let [expr-visitor (->ExprPlanVisitor env this-scope)]
+                                         [(-> (.expr ctx)
+                                              (.accept expr-visitor))]))))))
                         [])
           planned-l (plan-scope l)
           planned-r (plan-scope r)]
@@ -386,8 +393,16 @@
 
   (visitJoinTable [this ctx]
     (let [l (-> (.tableReference ctx 0) (.accept this))
-          r (-> (.tableReference ctx 1) (.accept this))]
-      (->JoinTable env l r (.joinType ctx) (.joinSpecification ctx))))
+          r (-> (.tableReference ctx 1) (.accept this))
+          common-cols (.accept (.joinSpecification ctx)
+                            (reify SqlVisitor
+                              (visitJoinCondition [_ _] nil)
+                              (visitNamedColumnsJoin [_ ctx]
+                                (->> (.columnNameList ctx) (.columnName)
+                                     (into #{} (map identifier-sym))))))]
+
+      (->JoinTable env l r (.joinType ctx) (.joinSpecification ctx)
+                   common-cols)))
 
   (visitDerivedTable [{{:keys [!id-count]} :env} ctx]
     (let [{:keys [plan col-syms]} (-> (.subquery ctx) (.queryExpression)
@@ -1734,6 +1749,6 @@
          (vary-meta assoc :param-count @!param-count)))))
 
 (comment
-  (plan-statement "SELECT bar + 1 as inc_bar FROM foo ORDER by inc_bar, 1, baz"
+  (plan-statement "SELECT * FROM foo USING (baz)"
                   {:table-info {"foo" #{"bar" "baz"}
                                 "bar" #{"baz" "quux"}}}))
