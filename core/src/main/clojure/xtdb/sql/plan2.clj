@@ -92,7 +92,8 @@
       (.computeIfAbsent !reqd-cols col-name
                         (reify Function
                           (apply [_ col]
-                            (symbol (str unique-table-alias) (str col)))))))
+                            (-> (symbol (str unique-table-alias) (str col))
+                                (vary-meta assoc :column? true)))))))
 
   (find-decl [this table-name col-name]
     (when (= table-name table-alias)
@@ -495,7 +496,7 @@
                                                                     (let [col-name (identifier-sym as-clause)]
                                                                       (->ProjectedCol {col-name expr} col-name))
 
-                                                                    (if (symbol? expr)
+                                                                    (if (and (symbol? expr) (not (:agg-out-sym? (meta expr))))
                                                                       (->ProjectedCol expr expr)
                                                                       (let [col-name (symbol (str "xt$column_" (inc col-idx)))]
                                                                         (->ProjectedCol {col-name expr} col-name)))))])
@@ -1188,7 +1189,7 @@
 
   (visitCountStarFunction [{{:keys [!id-count]} :env, :keys [^Map !aggs]} ctx]
     (let [agg-sym (-> (symbol (str "xt$row_count_" (swap! !id-count inc)))
-                      (vary-meta assoc :agg-out-sym? true))]
+                      (vary-meta assoc :agg-out-sym? true, :column? true))]
       (.put !aggs agg-sym '(row-count))
       agg-sym))
 
@@ -1197,7 +1198,7 @@
       (throw (UnsupportedOperationException. "array-agg sort-spec"))
 
       (let [agg-sym (-> (symbol (str "xt$array_agg_" (swap! !id-count inc)))
-                        (vary-meta assoc :agg-out-sym? true))]
+                        (vary-meta assoc :agg-out-sym? true, :column? true))]
         (.put !aggs agg-sym
               (list 'array-agg
                     (-> (.expr ctx)
@@ -1208,7 +1209,7 @@
   (visitSetFunction [{{:keys [!id-count]} :env, :keys [^Map !aggs], :as this} ctx]
     (let [set-fn (str/lower-case (.getText (.setFunctionType ctx)))
           agg-sym (-> (symbol (str "xt$" set-fn "_" (swap! !id-count inc)))
-                      (vary-meta assoc :agg-out-sym? true))]
+                      (vary-meta assoc :agg-out-sym? true, :column? true))]
       (.put !aggs agg-sym
             (list (symbol set-fn)
                   (-> (.expr ctx)
@@ -1439,6 +1440,14 @@
 
           group-invar-col-tracker (->GroupInvariantColsTracker env qs-scope (HashSet.))
 
+
+          having-plan (when-let [having-clause (.havingClause ctx)]
+                        (let [!subqs (HashMap.)
+                              !aggs (HashMap.)]
+                          {:predicate (.accept (.expr having-clause) (map->ExprPlanVisitor {:env env, :scope qs-scope, :!subqs !subqs, :!aggs !aggs}))
+                           :subqs (not-empty (into {} !subqs))
+                           :aggs (not-empty (into {} !aggs))}))
+
           select-clause (.selectClause ctx)
 
           select-plan (if select-clause
@@ -1451,9 +1460,15 @@
                     (-> plan (apply-sqs subqs))]
                    plan)
 
-                 (let [{:keys [aggs]} select-plan]
+                 (let [aggs (not-empty (merge (:aggs select-plan) (:aggs having-plan)))]
                    (cond-> plan
-                     (or aggs (.groupByClause ctx)) (wrap-aggs aggs (.accept ctx group-invar-col-tracker))))
+                     (or aggs (.groupByClause ctx))
+                     (wrap-aggs aggs (.accept ctx group-invar-col-tracker))))
+
+                 (if-let [{:keys [predicate subqs]} having-plan]
+                   [:select predicate
+                    (-> plan (apply-sqs subqs))]
+                   plan)
 
                  (let [{:keys [projected-cols subqs]} select-plan]
                    [:project (mapv :projection projected-cols)
@@ -1848,6 +1863,5 @@
          (vary-meta assoc :param-count @!param-count)))))
 
 (comment
-  (plan-statement "SELECT bar, COUNT(baz) FROM foo"
-                  {:table-info {"foo" #{"bar" "baz"}
-                                "bar" #{"baz" "quux"}}}))
+  (plan-statement "SELECT m.producer, SUM(m.`length`) FROM Movie AS m HAVING MIN(m.`year`) < 1930"
+                  {:table-info {"movie" #{"producer" "year" "length"}}}))
