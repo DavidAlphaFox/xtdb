@@ -31,6 +31,7 @@ DISTINCT: 'DISTINCT' ;
 NOT: 'NOT' ;
 ASYMMETRIC: 'ASYMMETRIC' ;
 SYMMETRIC: 'SYMMETRIC' ;
+RECURSIVE: 'RECURSIVE' ;
 
 /// §22 Direct invocation of SQL
 
@@ -540,7 +541,7 @@ asClause : 'AS'? columnName ;
 /// §7.13 <query expression>
 
 queryExpression : withClause? queryExpressionBody orderByClause? resultOffsetClause? fetchFirstClause? ;
-withClause : 'WITH' 'RECURSIVE'? withListElement (',' withListElement)* ;
+withClause : 'WITH' RECURSIVE? withListElement (',' withListElement)* ;
 withListElement : queryName ('(' columnNameList ')')? 'AS' subquery ;
 
 queryExpressionBody
