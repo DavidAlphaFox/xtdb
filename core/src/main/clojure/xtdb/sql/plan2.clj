@@ -231,6 +231,27 @@
     [:rename unique-table-alias
      plan]))
 
+(defrecord ArrowTable [env url table-alias unique-table-alias ^SequencedSet available-cols]
+  Scope
+  (available-cols [_ table-name]
+    (when-not (and table-name (not= table-name table-alias))
+      (or available-cols '[a])))
+
+  (find-decl [_ col-name]
+    (when (and available-cols (not (.contains available-cols col-name)))
+      (add-warning! env (format "Column %s not found on table %s" col-name table-alias)))
+    
+    (symbol (str unique-table-alias) (str col-name)))
+
+  (find-decl [this table-name col-name]
+    (when (= table-name table-alias)
+      (find-decl this col-name)))
+
+  (plan-scope [_]
+    [:rename unique-table-alias
+     [:project (or (vec available-cols) '[a])
+      [:arrow url]]]))
+
 (defrecord FromClauseScope [env inner-scope table-ref-scopes]
   Scope
   (available-cols [_ table-name]
@@ -524,7 +545,15 @@
                       (symbol (str table-alias "." (swap! !id-count inc)))
                       (LinkedHashSet. ^Collection col-syms))))
 
-  (visitWrappedTableReference [this ctx] (-> (.tableReference ctx) (.accept this))))
+  (visitWrappedTableReference [this ctx] (-> (.tableReference ctx) (.accept this)))
+
+  (visitArrowTable [{{:keys [!id-count]} :env} ctx]
+    (let [table-alias (identifier-sym (.tableAlias ctx))
+          cols (->table-projection (.tableProjection ctx))
+          url (some-> (.characterString ctx) (.accept (->ExprPlanVisitor env scope)))]
+      (->ArrowTable env url table-alias
+                    (symbol (str table-alias "." (swap! !id-count inc)))
+                    (when cols (LinkedHashSet. ^Collection cols))))))
 
 (defrecord SelectClauseProjectedCols [env scope order-by-specs]
   SqlVisitor
