@@ -1413,17 +1413,27 @@
                  plan]]]
               (with-meta {:col-syms out-cols})))))))
 
-(defn- remove-ns-qualifiers [{:keys [plan col-syms]}]
+(defrecord DuplicateColumnProjection [col-sym])
+
+(defn dups [seq]
+  (for [[id freq] (frequencies seq)
+        :when (> freq 1)]
+    id))
+
+(defn- remove-ns-qualifiers [{:keys [plan col-syms]} env]
   (let [out-projections (->> col-syms
                              (into [] (map (fn [col-sym]
                                              (if (namespace col-sym)
                                                (let [out-sym (symbol (name col-sym))]
                                                  (->ProjectedCol {out-sym col-sym}
                                                                  out-sym))
-                                               (->ProjectedCol col-sym col-sym))))))]
-    (->QueryExpr [:project (mapv :projection out-projections)
-                  plan]
-                 (mapv :col-sym out-projections))))
+                                               (->ProjectedCol col-sym col-sym))))))
+        out-col-syms (mapv :col-sym out-projections)
+        duplicate-col-syms (not-empty (dups out-col-syms))]
+    (if duplicate-col-syms
+      (for [sym duplicate-col-syms]
+        (add-err! env (->DuplicateColumnProjection sym)))
+      (->QueryExpr [:project (mapv :projection out-projections) plan] out-col-syms))))
 
 (defrecord QueryPlanVisitor [env scope]
   SqlVisitor
@@ -1448,7 +1458,7 @@
 
           query-expr)
 
-        (remove-ns-qualifiers query-expr)
+        (remove-ns-qualifiers query-expr env)
 
         (let [offset-clause (.resultOffsetClause ctx)
               limit-clause (.fetchFirstClause ctx)]
@@ -1468,9 +1478,9 @@
 
   (visitUnionQuery [this ctx]
     (let [{l-plan :plan, :keys [col-syms]} (-> (.queryExpressionBody ctx 0) (.accept this)
-                                               (remove-ns-qualifiers))
+                                               (remove-ns-qualifiers env))
           {r-plan :plan} (-> (.queryExpressionBody ctx 1) (.accept this)
-                             (remove-ns-qualifiers))
+                             (remove-ns-qualifiers env))
           plan [:union-all l-plan r-plan]]
       ;; TODO column matching
 
@@ -1481,9 +1491,9 @@
 
   (visitExceptQuery [this ctx]
     (let [{l-plan :plan, :keys [col-syms]} (-> (.queryExpressionBody ctx 0) (.accept this)
-                                               (remove-ns-qualifiers))
+                                               (remove-ns-qualifiers env))
           {r-plan :plan} (-> (.queryExpressionBody ctx 1) (.accept this)
-                             (remove-ns-qualifiers))
+                             (remove-ns-qualifiers env))
           distinct? (not (.ALL ctx))]
       ;; TODO column matching
 
@@ -1494,9 +1504,9 @@
 
   (visitIntersectQuery [this ctx]
     (let [{l-plan :plan, :keys [col-syms]} (-> (.queryExpressionBody ctx 0) (.accept this)
-                                               (remove-ns-qualifiers))
+                                               (remove-ns-qualifiers env))
           {r-plan :plan} (-> (.queryExpressionBody ctx 1) (.accept this)
-                             (remove-ns-qualifiers))
+                             (remove-ns-qualifiers env))
           plan [:intersect l-plan r-plan]]
       ;; TODO column matching
 
@@ -1623,7 +1633,7 @@
                 (.accept (assoc this :out-col-syms out-col-syms)))
           {:keys [plan col-syms] :as query-expr}
 
-        (remove-ns-qualifiers query-expr)
+        (remove-ns-qualifiers query-expr env)
 
         (if (some (comp types/temporal-column? str) col-syms)
           (->QueryExpr [:project (mapv (fn [col-sym]
