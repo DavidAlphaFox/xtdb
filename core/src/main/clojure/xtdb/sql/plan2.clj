@@ -1,6 +1,7 @@
 (ns xtdb.sql.plan2
   (:require [clojure.set :as set]
             [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [xtdb.error :as err]
             [xtdb.logical-plan :as lp]
             [xtdb.types :as types]
@@ -15,6 +16,10 @@
 
 (defn- add-err! [{:keys [!errors]} err]
   (swap! !errors conj err)
+  nil)
+
+(defn- add-warning! [{:keys [!warnings]} err]
+  (swap! !warnings conj err)
   nil)
 
 (declare ->ExprPlanVisitor map->ExprPlanVisitor ->QueryPlanVisitor)
@@ -51,7 +56,6 @@
     [:table [{}]]))
 
 (defrecord AmbiguousColumnReference [col-name])
-(defrecord ColumnNotFound [col-name])
 
 (defrecord CTE [plan col-syms])
 
@@ -123,19 +127,19 @@
       cols))
 
   (find-decl [_ col-name]
-    (when (or (contains? cols col-name)
-              (types/temporal-column? col-name))
-      (.computeIfAbsent !reqd-cols (-> col-name
-                                       (vary-meta assoc :column? true))
-                        (reify Function
-                          (apply [_ col]
-                            (-> (symbol (str unique-table-alias) (str col))
-                                (vary-meta assoc :column? true)))))))
+    (when-not (or (contains? cols col-name) (types/temporal-column? col-name))
+      (add-warning! env (format "Column %s not found on table %s" col-name table-alias)))
+    
+    (.computeIfAbsent !reqd-cols (-> col-name
+                                     (vary-meta assoc :column? true))
+                      (reify Function
+                        (apply [_ col]
+                          (-> (symbol (str unique-table-alias) (str col))
+                              (vary-meta assoc :column? true))))))
 
   (find-decl [this table-name col-name]
     (when (= table-name table-alias)
-      (or (find-decl this col-name)
-          (add-err! env (->ColumnNotFound col-name)))))
+      (find-decl this col-name)))
 
   (plan-scope [{{:keys [default-all-valid-time?]} :env, :as this}]
     (let [expr-visitor (->ExprPlanVisitor env this)]
@@ -212,15 +216,16 @@
   (available-cols [_ table-name]
     (when-not (and table-name (not= table-name table-alias))
       available-cols))
-
+  
   (find-decl [_ col-name]
-    (when (.contains available-cols col-name)
-      (symbol (str unique-table-alias) (str col-name))))
+    (when-not (.contains available-cols col-name)
+      (add-warning! env (format "Column %s not found on table %s" col-name table-alias)))
+    
+    (symbol (str unique-table-alias) (str col-name)))
 
   (find-decl [this table-name col-name]
     (when (= table-name table-alias)
-      (or (find-decl this col-name)
-          (add-err! env (->ColumnNotFound col-name)))))
+      (find-decl this col-name)))
 
   (plan-scope [_]
     [:rename unique-table-alias
@@ -805,10 +810,9 @@
           col-name (identifier-sym (.columnName ctx))]
       (when schema-name (throw (UnsupportedOperationException. "schema")))
 
-      (when-let [sym (or (if table-name
-                           (find-decl scope table-name col-name)
-                           (find-decl scope col-name))
-                         (add-err! env (->ColumnNotFound col-name)))]
+      (when-let [sym (if table-name
+                       (find-decl scope table-name col-name)
+                       (find-decl scope col-name))]
         (some-> !ob-col-refs (.add sym))
         sym)))
 
@@ -1874,12 +1878,18 @@
                            ->insertion-ordered-set)])
        (into {})))
 
+(defn log-warnings [!warnings]
+  (doseq [warning @!warnings]
+    (log/warn warning)))
+
 (defn plan-expr
   ([sql] (plan-expr sql {}))
 
   ([sql {:keys [scope table-info default-all-valid-time?]}]
    (let [!errors (atom [])
+         !warnings (atom [])
          env {:!errors !errors
+              :!warnings !warnings
               :!id-count (atom 0)
               :!param-count (atom 0)
               :table-info (xform-table-info table-info)
@@ -1891,7 +1901,9 @@
 
      (if-let [errs (not-empty @!errors)]
        (throw (err/illegal-arg :xtdb/sql-error {:errors errs}))
-       plan))))
+       (do
+         (log-warnings !warnings)
+         plan)))))
 
 ;; eventually these data structures will be used as logical plans,
 ;; we won't need an adapter
@@ -1932,25 +1944,29 @@
 
   ([sql {:keys [scope table-info default-all-valid-time?]}]
    (let [!errors (atom [])
+         !warnings (atom [])
          !param-count (atom 0)
          env {:!errors !errors
+              :!warnings !warnings
               :!id-count (atom 0)
               :!param-count !param-count
               :table-info (xform-table-info table-info)
               :default-all-valid-time? (boolean default-all-valid-time?)}
          stmt (-> (parse-statement sql)
                   (.accept (->StmtVisitor env scope)))]
-     (-> (if-let [errs (not-empty @!errors)]
-           (throw (err/illegal-arg :xtdb/sql-error {:errors errs}))
-           (-> stmt
-               #_(doto clojure.pprint/pprint) ;; <<no-commit>>
-               (optimise-stmt) ;; <<no-commit>>
-               #_(doto clojure.pprint/pprint) ;; <<no-commit>>
-               ))
-         (vary-meta assoc :param-count @!param-count)))))
+     (if-let [errs (not-empty @!errors)]
+       (throw (err/illegal-arg :xtdb/sql-error {:errors errs}))
+       (do
+         (log-warnings !warnings)
+         (-> stmt
+             #_(doto clojure.pprint/pprint) ;; <<no-commit>>
+             (optimise-stmt) ;; <<no-commit>>
+             #_(doto clojure.pprint/pprint) ;; <<no-commit>>
+             (vary-meta assoc :param-count @!param-count)))))))
 
 (comment
   (plan-statement "WITH foo AS (SELECT id FROM bar WHERE id = 5)
                    SELECT foo.id, baz.id
                    FROM foo, foo AS baz"
                   {:table-info {"bar" #{"id"}}}))
+
