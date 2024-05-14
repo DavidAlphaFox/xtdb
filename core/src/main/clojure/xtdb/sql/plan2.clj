@@ -606,7 +606,8 @@
 
                                                                                (if (and (symbol? expr) (not (:agg-out-sym? (meta expr))))
                                                                                  (->ProjectedCol expr expr)
-                                                                                 (let [col-name (symbol (str "xt$column_" (inc col-idx)))]
+                                                                                 (let [col-name (or (:identifier (meta expr)) 
+                                                                                                    (symbol (str "xt$column_" (inc col-idx))))]
                                                                                    (->ProjectedCol {col-name expr} col-name)))))])
 
                                                                         (visitQualifiedAsterisk [_ ctx]
@@ -860,7 +861,8 @@
   (visitFieldAccess [this ctx]
     (let [ve (-> (.expr ctx) (.accept this))
           field-name (identifier-sym (.fieldName ctx))]
-      (list '. ve (keyword field-name))))
+      (-> (list '. ve (keyword field-name))
+          (vary-meta assoc :identifier field-name))))
 
   (visitArrayAccess [this ctx]
     (let [ve (-> (.expr ctx 0) (.accept this))
