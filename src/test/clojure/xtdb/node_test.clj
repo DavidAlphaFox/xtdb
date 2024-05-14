@@ -514,13 +514,13 @@ VALUES(1, OBJECT ('foo': OBJECT('bibble': true), 'bar': OBJECT('baz': 1001)))"]]
 
 (t/deftest test-explain-plan-sql
   (t/is (= [{:plan
-             "[:rename
- {x1 xt$id, x2 foo}
+             "[:project
+ [{xt$id u.1/xt$id} {foo u.1/foo}]
  [:project
-  [x1 x2]
+  [u.1/xt$id u.1/foo]
   [:rename
-   {xt$id x1, foo x2, a x3, b x4}
-   [:select (= (+ a b) 12) [:scan {:table users} [xt$id foo a b]]]]]]
+   u.1
+   [:select (= (+ a b) 12) [:scan {:table users} [b foo a xt$id]]]]]]
 "}]
            (xt/q tu/*node*
                  "SELECT u.xt$id, u.foo FROM users u WHERE u.a + u.b = 12"
